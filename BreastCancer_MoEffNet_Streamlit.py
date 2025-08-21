@@ -342,15 +342,46 @@ class MoEffNetClassifier(nn.Module):
 
 @st.cache_resource
 def load_model():
-    """Load the trained MoEffNet model"""
-    model_path = "best_patch_classifier.pth"
+    """Load the trained MoEffNet model from Hugging Face or local fallback"""
+    from huggingface_hub import hf_hub_download
+    import os
+    
+    # Hugging Face configuration
+    HF_USERNAME = "kateikyoushi"
+    HF_REPO = "BC_MoEffNetB1"
+    MODEL_FILENAME = "best_patch_classifier.pth"
     
     try:
         # Create model instance
         model = MoEffNetClassifier(num_classes=NUM_CLASSES, num_experts=NUM_EXPERTS, pretrained=False)
         
-        # Load weights
-        checkpoint = torch.load(model_path, map_location=device)
+        checkpoint = None
+        model_source = None
+        
+        # Try to load from Hugging Face first
+        try:
+            st.info("🤗 Attempting to load model from Hugging Face...")
+            model_path = hf_hub_download(
+                repo_id=f"{HF_USERNAME}/{HF_REPO}",
+                filename=MODEL_FILENAME,
+                cache_dir="./hf_cache"  # Local cache directory
+            )
+            checkpoint = torch.load(model_path, map_location=device)
+            model_source = "Hugging Face"
+            st.success(f"✅ Model loaded from Hugging Face: {HF_USERNAME}/{HF_REPO}")
+            
+        except Exception as hf_error:
+            # Fallback to local loading
+            st.warning(f"⚠️ Hugging Face loading failed: {hf_error}")
+            st.info("🔄 Attempting to load model from local file...")
+            
+            local_model_path = "best_patch_classifier.pth"
+            if os.path.exists(local_model_path):
+                checkpoint = torch.load(local_model_path, map_location=device)
+                model_source = "Local file"
+                st.success("✅ Model loaded from local file")
+            else:
+                raise FileNotFoundError(f"Neither Hugging Face nor local model file '{local_model_path}' could be loaded")
         
         # Handle different checkpoint formats
         if isinstance(checkpoint, dict):
@@ -366,10 +397,14 @@ def load_model():
         model.to(device)
         model.eval()
         
+        # Store model source info for display
+        model._source_info = model_source
+        
         return model, None
         
     except Exception as e:
-        return None, str(e)
+        error_msg = f"Failed to load model from both Hugging Face ({HF_USERNAME}/{HF_REPO}) and local file: {str(e)}"
+        return None, error_msg
 
 # =============================================================================
 # IMAGE PROCESSING AND TRANSFORMS
@@ -1108,7 +1143,8 @@ def main():
         **Experts:** 4 specialized networks  
         **Classes:** Normal, Benign, Malignant  
         **Input Size:** 224×224 pixels  
-        **Backbone:** EfficientNet-B1 (ImageNet pretrained)
+        **Backbone:** EfficientNet-B1 (ImageNet pretrained)  
+        **Model Source:** 🤗 Hugging Face: `kateikyoushi/BC_MoEffNetB1`
         """)
         
         # Advanced settings
@@ -1123,10 +1159,18 @@ def main():
     
     if model is None:
         st.error(f"❌ Failed to load model: {error}")
-        st.info("Please ensure 'best_patch_classifier.pth' is in the current directory.")
+        st.info("""
+        **Model Loading Options:**
+        1. **Hugging Face (Recommended):** Model will be automatically downloaded from `kateikyoushi/BC_MoEffNetB1`
+        2. **Local Fallback:** Place `best_patch_classifier.pth` in the current directory
+        """)
         return
     
-    st.success("✅ MoEffNet model loaded successfully!")
+    # Display model source information
+    if hasattr(model, '_source_info'):
+        st.success(f"✅ MoEffNet model loaded successfully from: {model._source_info}")
+    else:
+        st.success("✅ MoEffNet model loaded successfully!")
     
     # Main interface tabs
     tab1, tab2, tab3 = st.tabs(["📤 Upload & Analyze", "📊 Results Dashboard", "📖 About MoEffNet"])
