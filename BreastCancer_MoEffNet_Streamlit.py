@@ -342,46 +342,15 @@ class MoEffNetClassifier(nn.Module):
 
 @st.cache_resource
 def load_model():
-    """Load the trained MoEffNet model from Hugging Face or local fallback"""
-    from huggingface_hub import hf_hub_download
-    import os
-    
-    # Hugging Face configuration
-    HF_USERNAME = "kateikyoushi"
-    HF_REPO = "BC_MoEffNetB1"
-    MODEL_FILENAME = "best_patch_classifier.pth"
+    """Load the trained MoEffNet model"""
+    model_path = "best_patch_classifier.pth"
     
     try:
         # Create model instance
         model = MoEffNetClassifier(num_classes=NUM_CLASSES, num_experts=NUM_EXPERTS, pretrained=False)
         
-        checkpoint = None
-        model_source = None
-        
-        # Try to load from Hugging Face first
-        try:
-            st.info("🤗 Attempting to load model from Hugging Face...")
-            model_path = hf_hub_download(
-                repo_id=f"{HF_USERNAME}/{HF_REPO}",
-                filename=MODEL_FILENAME,
-                cache_dir="./hf_cache"  # Local cache directory
-            )
-            checkpoint = torch.load(model_path, map_location=device)
-            model_source = "Hugging Face"
-            st.success(f"✅ Model loaded from Hugging Face: {HF_USERNAME}/{HF_REPO}")
-            
-        except Exception as hf_error:
-            # Fallback to local loading
-            st.warning(f"⚠️ Hugging Face loading failed: {hf_error}")
-            st.info("🔄 Attempting to load model from local file...")
-            
-            local_model_path = "best_patch_classifier.pth"
-            if os.path.exists(local_model_path):
-                checkpoint = torch.load(local_model_path, map_location=device)
-                model_source = "Local file"
-                st.success("✅ Model loaded from local file")
-            else:
-                raise FileNotFoundError(f"Neither Hugging Face nor local model file '{local_model_path}' could be loaded")
+        # Load weights
+        checkpoint = torch.load(model_path, map_location=device)
         
         # Handle different checkpoint formats
         if isinstance(checkpoint, dict):
@@ -397,14 +366,10 @@ def load_model():
         model.to(device)
         model.eval()
         
-        # Store model source info for display
-        model._source_info = model_source
-        
         return model, None
         
     except Exception as e:
-        error_msg = f"Failed to load model from both Hugging Face ({HF_USERNAME}/{HF_REPO}) and local file: {str(e)}"
-        return None, error_msg
+        return None, str(e)
 
 # =============================================================================
 # IMAGE PROCESSING AND TRANSFORMS
@@ -436,6 +401,59 @@ def load_image_from_url(url):
 # =============================================================================
 # RECTANGLE SELECTION SYSTEM - STREAMLIT IMAGE COORDINATES
 # =============================================================================
+
+def resize_image_for_display(image, max_height=600):
+    """
+    Resize image for display with fixed maximum height while maintaining aspect ratio
+    
+    Args:
+        image: PIL Image object
+        max_height: Maximum height in pixels for display
+    
+    Returns:
+        tuple: (resized_image, scale_factor)
+    """
+    original_width, original_height = image.size
+    
+    # If image height is less than max_height, don't resize
+    if original_height <= max_height:
+        return image, 1.0
+    
+    # Calculate scale factor based on height constraint
+    scale_factor = max_height / original_height
+    new_width = int(original_width * scale_factor)
+    new_height = max_height
+    
+    # Resize image
+    resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    
+    return resized_image, scale_factor
+
+def scale_coordinates_to_original(coordinates, scale_factor):
+    """
+    Scale coordinates from display image back to original image size
+    
+    Args:
+        coordinates: Tuple of ((x1, y1), (x2, y2)) from display image
+        scale_factor: Scale factor used for display
+    
+    Returns:
+        Scaled coordinates for original image
+    """
+    if not coordinates or scale_factor == 1.0:
+        return coordinates
+    
+    point1, point2 = coordinates
+    x1, y1 = point1
+    x2, y2 = point2
+    
+    # Scale back to original size
+    orig_x1 = int(x1 / scale_factor)
+    orig_y1 = int(y1 / scale_factor)
+    orig_x2 = int(x2 / scale_factor)
+    orig_y2 = int(y2 / scale_factor)
+    
+    return ((orig_x1, orig_y1), (orig_x2, orig_y2))
 
 def get_rectangle_coords(coordinates):
     """Convert streamlit_image_coordinates format to standard rectangle coords"""
@@ -495,9 +513,14 @@ def extract_rectangle_patch(image, coordinates):
     
     x1, y1, x2, y2 = coords
     
-    # Ensure we have a reasonable rectangle size
-    if abs(x2 - x1) < 20 or abs(y2 - y1) < 20:
-        return None
+    # Check if whole image is selected
+    image_width, image_height = image.size
+    is_whole_image = (x1 == 0 and y1 == 0 and x2 == image_width and y2 == image_height)
+    
+    if not is_whole_image:
+        # Ensure we have a reasonable rectangle size for manual selection
+        if abs(x2 - x1) < 20 or abs(y2 - y1) < 20:
+            return None
     
     # Extract the rectangle from image
     patch = image.crop(coords)
@@ -508,41 +531,107 @@ def extract_rectangle_patch(image, coordinates):
     return patch_resized, patch, coords
 
 def create_rectangle_selection_interface(image):
-    """Create the rectangle selection interface"""
+    """Create the rectangle selection interface with constrained height display"""
     
-    # Initialize coordinates in session state
+    # Initialize coordinates and scale factor in session state
     if "coordinates" not in st.session_state:
         st.session_state["coordinates"] = None
+    if "display_scale_factor" not in st.session_state:
+        st.session_state["display_scale_factor"] = 1.0
     
-    # Create image with overlay
-    img_with_overlay = create_rectangle_overlay(image, st.session_state["coordinates"])
+    # Get max display height from settings (default 600 if not set)
+    max_height = st.session_state.get("max_display_height", 600)
     
     # Create columns for layout
     col_image, col_patch, col_controls = st.columns([3, 1, 1])
     
     with col_image:
         st.subheader("🖼️ Select Region of Interest")
-        st.markdown("**Instructions:** Click and drag to select a rectangular region for analysis")
         
-        # Image coordinates selector
-        value = streamlit_image_coordinates(
-            img_with_overlay, 
-            key="rectangle_selector", 
-            click_and_drag=True
+        # ROI selection options
+        roi_method = st.radio(
+            "Choose ROI selection method:",
+            ["🎯 Manual Rectangle", "🖼️ Whole Image"],
+            horizontal=True,
+            help="Select either a custom rectangle or use the entire image"
         )
         
-        # Handle rectangle selection
-        if value is not None:
-            point1 = value["x1"], value["y1"]
-            point2 = value["x2"], value["y2"]
+        if roi_method == "🖼️ Whole Image":
+            st.markdown("**Whole image selected for analysis**")
+            # Set coordinates to cover the entire image
+            image_width, image_height = image.size
+            st.session_state["coordinates"] = ((0, 0), (image_width, image_height))
+            st.session_state["display_scale_factor"] = 1.0
+            # Show the whole image with a border to indicate selection
+            img_with_overlay = create_rectangle_overlay(image, st.session_state["coordinates"])
             
-            # Only update if we have a valid rectangle and it's different from current
-            if (point1[0] != point2[0] and 
-                point1[1] != point2[1] and 
-                st.session_state["coordinates"] != (point1, point2)):
+            # Resize for display
+            display_image, scale_factor = resize_image_for_display(img_with_overlay, max_height=max_height)
+            st.image(display_image, caption="Entire image selected for analysis")
+            
+        else:
+            st.markdown("**Instructions:** Click and drag to select a rectangular region for analysis")
+            
+            # Resize image for display to constrain height
+            display_image, scale_factor = resize_image_for_display(image, max_height=max_height)
+            st.session_state["display_scale_factor"] = scale_factor
+            
+            # Create overlay on display image (scale coordinates for display)
+            display_coordinates = st.session_state["coordinates"]
+            if display_coordinates and scale_factor != 1.0:
+                # Scale coordinates for display
+                point1, point2 = display_coordinates
+                x1, y1 = point1
+                x2, y2 = point2
                 
-                st.session_state["coordinates"] = (point1, point2)
-                st.rerun()
+                # Scale coordinates to display size
+                display_x1 = int(x1 * scale_factor)
+                display_y1 = int(y1 * scale_factor)
+                display_x2 = int(x2 * scale_factor)
+                display_y2 = int(y2 * scale_factor)
+                
+                display_coordinates = ((display_x1, display_y1), (display_x2, display_y2))
+            
+            img_with_overlay = create_rectangle_overlay(display_image, display_coordinates)
+            
+            # Show image dimensions info
+            orig_w, orig_h = image.size
+            disp_w, disp_h = display_image.size
+            if scale_factor != 1.0:
+                st.caption(f"**Display:** {disp_w}×{disp_h} (scaled from {orig_w}×{orig_h}, factor: {scale_factor:.2f})")
+            else:
+                st.caption(f"**Size:** {orig_w}×{orig_h}")
+            
+            # Image coordinates selector
+            value = streamlit_image_coordinates(
+                img_with_overlay, 
+                key="rectangle_selector", 
+                click_and_drag=True
+            )
+            
+            # Handle rectangle selection
+            if value is not None:
+                # Get coordinates from display image
+                display_point1 = value["x1"], value["y1"]
+                display_point2 = value["x2"], value["y2"]
+                
+                # Scale back to original image coordinates
+                if scale_factor != 1.0:
+                    orig_x1 = int(display_point1[0] / scale_factor)
+                    orig_y1 = int(display_point1[1] / scale_factor)
+                    orig_x2 = int(display_point2[0] / scale_factor)
+                    orig_y2 = int(display_point2[1] / scale_factor)
+                    original_coords = ((orig_x1, orig_y1), (orig_x2, orig_y2))
+                else:
+                    original_coords = (display_point1, display_point2)
+                
+                # Only update if we have a valid rectangle and it's different from current
+                if (display_point1[0] != display_point2[0] and 
+                    display_point1[1] != display_point2[1] and 
+                    st.session_state["coordinates"] != original_coords):
+                    
+                    st.session_state["coordinates"] = original_coords
+                    st.rerun()
     
     with col_patch:
         st.subheader("� Selected Region")
@@ -554,20 +643,31 @@ def create_rectangle_selection_interface(image):
             if result:
                 patch_resized, patch_original, coords = result
                 
-                # Show original selection (enlarged)
-                enlargement_factor = 1.5
-                enlarged_patch = patch_original.resize(
-                    (int(patch_original.width * enlargement_factor), 
-                     int(patch_original.height * enlargement_factor)),
-                    Image.Resampling.LANCZOS
-                )
+                # Check if whole image is selected
+                image_width, image_height = image.size
+                is_whole_image = (coords[0] == 0 and coords[1] == 0 and 
+                                coords[2] == image_width and coords[3] == image_height)
                 
-                st.image(enlarged_patch, caption="Selected Region (Enlarged)", use_column_width=True)
-                
-                # Show coordinates info
-                x1, y1, x2, y2 = coords
-                st.caption(f"**Region:** ({x1}, {y1}) to ({x2}, {y2})")
-                st.caption(f"**Size:** {x2-x1} × {y2-y1} pixels")
+                if is_whole_image:
+                    # Show the resized whole image
+                    st.image(patch_resized, caption="Whole Image (Resized to 224x224)", use_column_width=True)
+                    st.caption(f"**Original Size:** {image_width} × {image_height} pixels")
+                    st.caption(f"**Resized to:** {PATCH_SIZE} × {PATCH_SIZE} pixels for analysis")
+                else:
+                    # Show original selection (enlarged)
+                    enlargement_factor = 1.5
+                    enlarged_patch = patch_original.resize(
+                        (int(patch_original.width * enlargement_factor), 
+                         int(patch_original.height * enlargement_factor)),
+                        Image.Resampling.LANCZOS
+                    )
+                    
+                    st.image(enlarged_patch, caption="Selected Region (Enlarged)", use_column_width=True)
+                    
+                    # Show coordinates info
+                    x1, y1, x2, y2 = coords
+                    st.caption(f"**Region:** ({x1}, {y1}) to ({x2}, {y2})")
+                    st.caption(f"**Size:** {x2-x1} × {y2-y1} pixels")
                 
                 # Store for analysis
                 st.session_state["current_patch"] = patch_resized
@@ -594,6 +694,7 @@ def create_rectangle_selection_interface(image):
         # Clear selection
         if st.button("🔄 Clear Selection", use_container_width=True):
             st.session_state["coordinates"] = None
+            st.session_state["display_scale_factor"] = 1.0
             if "current_patch" in st.session_state:
                 del st.session_state["current_patch"]
             if "patch_coords" in st.session_state:
@@ -603,6 +704,11 @@ def create_rectangle_selection_interface(image):
         # Quick selection helpers
         st.markdown("---")
         st.subheader("📏 Selection Info")
+        
+        # Show scale factor info
+        scale_factor = st.session_state.get("display_scale_factor", 1.0)
+        if scale_factor != 1.0:
+            st.caption(f"**Display Scale:** {scale_factor:.2f}x (height constrained to 600px)")
         
         if st.session_state["coordinates"]:
             coords = get_rectangle_coords(st.session_state["coordinates"])
@@ -616,8 +722,13 @@ def create_rectangle_selection_interface(image):
                 st.metric("Height", f"{height}px")
                 st.metric("Area", f"{area:,}px²")
                 
-                # Size recommendation
-                if width < 100 or height < 100:
+                # Check if whole image is selected
+                image_width, image_height = image.size
+                is_whole_image = (x1 == 0 and y1 == 0 and x2 == image_width and y2 == image_height)
+                
+                if is_whole_image:
+                    st.success("🖼️ Whole image selected for analysis!")
+                elif width < 100 or height < 100:
                     st.warning("⚠️ Small region selected. Consider selecting a larger area for better analysis.")
                 elif width > 800 or height > 800:
                     st.info("ℹ️ Large region selected. Analysis will focus on key features.")
@@ -1143,8 +1254,7 @@ def main():
         **Experts:** 4 specialized networks  
         **Classes:** Normal, Benign, Malignant  
         **Input Size:** 224×224 pixels  
-        **Backbone:** EfficientNet-B1 (ImageNet pretrained)  
-        **Model Source:** 🤗 Hugging Face: `kateikyoushi/BC_MoEffNetB1`
+        **Backbone:** EfficientNet-B1 (ImageNet pretrained)
         """)
         
         # Advanced settings
@@ -1152,6 +1262,18 @@ def main():
             show_expert_analysis = st.checkbox("Show Expert Analysis", value=True)
             show_confidence_gauge = st.checkbox("Show Confidence Gauge", value=True)
             patch_overlay_opacity = st.slider("Patch Overlay Opacity", 0.0, 1.0, 0.3)
+            
+            # Image display settings
+            st.markdown("**Image Display Settings**")
+            max_display_height = st.slider(
+                "Max Display Height (px)", 
+                min_value=400, 
+                max_value=1000, 
+                value=600, 
+                step=50,
+                help="Maximum height for image display. Width adjusts proportionally."
+            )
+            st.session_state["max_display_height"] = max_display_height
     
     # Load model
     with st.spinner("🔄 Loading MoEffNet model..."):
@@ -1159,18 +1281,10 @@ def main():
     
     if model is None:
         st.error(f"❌ Failed to load model: {error}")
-        st.info("""
-        **Model Loading Options:**
-        1. **Hugging Face (Recommended):** Model will be automatically downloaded from `kateikyoushi/BC_MoEffNetB1`
-        2. **Local Fallback:** Place `best_patch_classifier.pth` in the current directory
-        """)
+        st.info("Please ensure 'best_patch_classifier.pth' is in the current directory.")
         return
     
-    # Display model source information
-    if hasattr(model, '_source_info'):
-        st.success(f"✅ MoEffNet model loaded successfully from: {model._source_info}")
-    else:
-        st.success("✅ MoEffNet model loaded successfully!")
+    st.success("✅ MoEffNet model loaded successfully!")
     
     # Main interface tabs
     tab1, tab2, tab3 = st.tabs(["📤 Upload & Analyze", "📊 Results Dashboard", "📖 About MoEffNet"])
@@ -1221,12 +1335,13 @@ def main():
             st.markdown("""
             **How to use:**
             1. **Upload** a mammogram image
-            2. **Draw a rectangle** around suspicious areas
+            2. **Choose ROI selection:** Either draw a rectangle around suspicious areas OR select the whole image
             3. **Click "Analyze Region"** to get AI classification
             4. **View detailed results** and expert analysis
             
             **Tips:**
-            - Draw rectangles around areas of interest
+            - Use "Manual Rectangle" for specific suspicious areas
+            - Use "Whole Image" for overall image analysis
             - Larger regions provide more context
             - Check confidence scores and expert analysis
             - Use the dashboard for detailed insights
@@ -1237,8 +1352,8 @@ def main():
             # Store image in session state
             st.session_state.current_image = uploaded_image
             
-            st.subheader("2️⃣ Interactive Rectangle Selection")
-            st.markdown("**Draw a rectangle** around the suspicious area you want to analyze.")
+            st.subheader("2️⃣ Interactive ROI Selection")
+            st.markdown("**Choose your analysis method:** Select a specific region or analyze the entire image.")
             
             # Create rectangle selection interface
             analyze_roi = create_rectangle_selection_interface(uploaded_image)
@@ -1251,7 +1366,7 @@ def main():
                 
                 with col_results1:
                     # Show processed patch (model input)
-                    st.subheader("📋 Model Input Patch")
+                    st.subheader("📋 Model Input")
                     st.image(
                         st.session_state["current_patch"], 
                         caption=f"Resized to {PATCH_SIZE}×{PATCH_SIZE} for MoEffNet", 
@@ -1262,8 +1377,19 @@ def main():
                     if "patch_coords" in st.session_state:
                         coords = st.session_state["patch_coords"]
                         x1, y1, x2, y2 = coords
-                        st.caption(f"**Original Region:** ({x1}, {y1}) to ({x2}, {y2})")
-                        st.caption(f"**Original Size:** {x2-x1} × {y2-y1} pixels")
+                        
+                        # Check if whole image is selected
+                        if hasattr(st.session_state, 'current_image'):
+                            image_width, image_height = st.session_state.current_image.size
+                            is_whole_image = (x1 == 0 and y1 == 0 and x2 == image_width and y2 == image_height)
+                            
+                            if is_whole_image:
+                                st.caption(f"**Analysis Type:** Whole Image")
+                                st.caption(f"**Original Size:** {image_width} × {image_height} pixels")
+                            else:
+                                st.caption(f"**Analysis Type:** Selected Region")
+                                st.caption(f"**Region:** ({x1}, {y1}) to ({x2}, {y2})")
+                                st.caption(f"**Original Size:** {x2-x1} × {y2-y1} pixels")
                 
                 with col_results2:
                     # Classify patch with comprehensive analysis
