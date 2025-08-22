@@ -12,6 +12,13 @@ Features:
 - Expert contribution analysis and gating visualization
 - Professional-grade UI with confidence scoring
 - Support for DICOM, PNG, JPEG, and URL uploads
+- Automatic model download from Hugging Face Hub
+
+Model Details:
+- Repository: kateikyoushi/BC_MoEffNetB1
+- Classes: ['benign', 'malignant', 'normal']
+- Experts: 4 specialized networks
+- Architecture: Multi-Expert EfficientNet-B1
 
 Author: AI Medical Imaging Team
 Date: August 2025
@@ -37,6 +44,7 @@ import base64
 import json
 from streamlit_image_coordinates import streamlit_image_coordinates
 import matplotlib.cm as cm
+from huggingface_hub import hf_hub_download
 
 # Configure page FIRST - before any other Streamlit commands
 st.set_page_config(
@@ -56,6 +64,10 @@ NUM_EXPERTS = 4
 CLASS_NAMES = ['benign', 'malignant', 'normal']
 IMG_SIZE = 224
 PATCH_SIZE = 224
+
+# Hugging Face Model Configuration
+HF_REPO_ID = "kateikyoushi/BC_MoEffNetB1"
+HF_MODEL_FILE = "best_patch_classifier.pth"
 
 # Color coding for results
 CLASS_COLORS = {
@@ -342,10 +354,16 @@ class MoEffNetClassifier(nn.Module):
 
 @st.cache_resource
 def load_model():
-    """Load the trained MoEffNet model"""
-    model_path = "best_patch_classifier.pth"
-    
+    """Load the trained MoEffNet model from Hugging Face Hub"""
     try:
+        # Download model from Hugging Face Hub
+        with st.spinner("Downloading model from Hugging Face Hub..."):
+            model_path = hf_hub_download(
+                repo_id=HF_REPO_ID,
+                filename=HF_MODEL_FILE,
+                cache_dir="./.cache"  # Local cache directory
+            )
+        
         # Create model instance
         model = MoEffNetClassifier(num_classes=NUM_CLASSES, num_experts=NUM_EXPERTS, pretrained=False)
         
@@ -1281,7 +1299,7 @@ def main():
     
     if model is None:
         st.error(f"❌ Failed to load model: {error}")
-        st.info("Please ensure 'best_patch_classifier.pth' is in the current directory.")
+        st.info(f"Please check your internet connection. The model will be downloaded from Hugging Face Hub: {HF_REPO_ID}")
         return
     
     st.success("✅ MoEffNet model loaded successfully!")
@@ -1817,10 +1835,12 @@ Always consult healthcare professionals.
         2. **Advanced Training**: Mixed precision, early stopping, comprehensive metrics
         3. **Expert Analysis**: Detailed visualization of expert contributions
         4. **Interactive Interface**: Real-time mammogram analysis with click selection
-        5. **Production Ready**: Cached model loading, error handling, professional UI
+        5. **Production Ready**: Cached model loading from Hugging Face Hub, error handling, professional UI
+        6. **Cloud Model Hosting**: Pre-trained model hosted on Hugging Face Hub (kateikyoushi/BC_MoEffNetB1)
         
         The model achieves state-of-the-art performance through its multi-expert architecture
-        while maintaining interpretability through gating visualization.
+        while maintaining interpretability through gating visualization. The model is automatically
+        downloaded from Hugging Face Hub on first use and cached locally for subsequent runs.
         """)
 
 if __name__ == "__main__":
